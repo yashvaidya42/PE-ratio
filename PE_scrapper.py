@@ -1,98 +1,136 @@
-import requests, re
-from multiprocessing import Pool
-from datetime import datetime
+"""
+Fixed/modernized version of naveen7v/PE-ratio's PE_scrapper.py.
 
-n = datetime.today().date()
-vdat, count = str(n), 0
-DOWNLOAD_PATH = '/home/PE/'
+MoneyControl's Terms of Use (https://www.moneycontrol.com/cdata/termsofuse.php)
+explicitly prohibit automated scraping/bots without prior written permission.
+This is a technical fix to the existing repo's broken approach, not a
+statement that this use is permitted - get written permission from
+MoneyControl, or use an official/licensed data source, before any real or
+production use.
 
-# Below is a dictionary containing the some sample stocks with their Symbol as key 
-# and  links from moneycontrol.com as value
-# for eg: CROMPTON's link in money control is 
-# http://www.moneycontrol.com/india/stockpricequote/electricals/cromptongreavesconsumerelectrical/CGC01
+What changed from the original and why:
+  1. Two real syntax errors fixed: `stock_list.items` -> `stock_list.items()`,
+     `count+ = 1` -> `count += 1`.
+  2. The hardcoded 40-company dict of guessed URL slugs is replaced by
+     MoneyControl's own search API (api.moneycontrol.com/mcapi/v1/stock/search),
+     which resolves a company name/symbol to its real internal code ("did").
+     A search can return several similarly-named companies (e.g. searching
+     "reliance" also returns Reliance Chemotex, Reliance Communications,
+     Reliance Infra on BSE) - this picks the entry whose full_name/short_name
+     best matches the query, not just the first result.
+  3. The old regex scrape ("find a line containing 'P/E', parse the next
+     line for a number") no longer matches MoneyControl's current page and
+     is replaced with direct lookup of `id="{did}_<fieldname>"` HTML elements,
+     confirmed against a real fetched page.
+  4. Confirmed empirically: the URL's descriptive path segments (e.g.
+     "refineries/relianceindustries") don't need to be correct - MoneyControl
+     redirects any slug to the canonical URL as long as the trailing `did` is
+     right, so this script never needs to guess a slug.
+"""
+import csv
+import os
+import re
+import time
+from datetime import date
 
-# http://www.moneycontrol.com/india/stockpricequote/ - this part of the link is common to all stocks in moneycontrol.com
-# so if you are adding your stocks, add their NSE symbol as key and later part of the link of that stock from moneycontrol 
+import requests
 
-stock_list = {'CROMPTON':'electricals/cromptongreavesconsumerelectrical/CGC01',
-      'GLENMARK':'pharmaceuticals/glenmarkpharma/GP08',
-      'WOCKPHARMA':'pharmaceuticals/wockhardt/W05',
-      'RELIANCE':'refineries/relianceindustries/RI',
-      'POLARIS':'computerssoftware/polarisconsultingservices/PSL01', 
-      'BRITANNIA': 'food-processing/britanniaindustries/BI', 
-      'SINTEX': 'diversified/sintexindustries/SI27', 
-      'FSL': 'computerssoftwaremediumsmall/firstsourcesolutions/FS07', 
-      'M%26M': 'autocarsjeeps/mahindramahindra/MM', 
-      'ADANIENT': 'trading/adanienterprises/AE13', 
-      'SRTRANSFIN': 'finance-leasing-hire-purchase/shriramtransportfinancecorporation/STF',
-      'RENUKA':'sugar/shreerenukasugars/SRS03',
-      'PENIND': 'steel-cr-hr-strips/pennarindustries/PI28', 
-      'BANKBARODA': 'bankspublicsector/bankofbaroda/BOB', 
-      'DIVISLAB': 'pharmaceuticals/divislaboratories/DL03', 
-      'RECLTD': 'financetermlendinginstitutions/ruralelectrificationcorporation/REC02', 
-      'BHARATFORG': 'castingsforgings/bharatforge/BF03', 
-      'TATASTEEL': 'steellarge/tatasteel/TIS', 
-      'OBEROIRLTY': 'constructioncontractingrealestate/oberoirealty/OR', 
-      'ADANIPOWER': 'powergenerationdistribution/adanipower/AP11', 
-      'MINDTREE': 'computerssoftware/mindtree/MT13', 
-      'VIPIND': 'plastics/vipindustries/VIP', 
-      'DRREDDY': 'pharmaceuticals/drreddyslaboratories/DRL', 
-      'NATIONALUM': 'aluminium/nationalaluminiumcompany/NAC', 
-      'L%26TFH': 'financeinvestments/ltfinanceholdings/LFH', 
-      'IDBI': 'bankspublicsector/idbibank/IDB05', 
-      'DELTACORP': 'financegeneral/deltacorp/DC11', 
-      'ONGC': 'oildrillingandexploration/ongc/ONG', 
-      'ACE': 'engineering-heavy/actionconstructionequipment/ACE3',
-      'VEDL': 'miningminerals/vedanta/SG', 
-      'CENTURYPLY': 'miscellaneous/centuryplyboards/CP9', 
-      'HINDCOPPER': 'metalsnonferrous/hindustancopper/HC07', 
-      'CENTURYTEX': 'diversified/centurytextilesindustries/CTI', 
-      'COX%26KINGS': 'miscellaneous/coxkings/CK', 
-      'FORTIS': 'hospitalsmedicalservices/fortishealthcare/FH', 
-      'SUZLON': 'powergenerationdistribution/suzlonenergy/SE17', 
-      'PERSISTENT': 'computerssoftware/persistentsystems/PS15', 
-      'TITAN': 'miscellaneous/titancompany/TI01', 
-      'LICHSGFIN': 'financehousing/lichousingfinance/LIC', 
-      'ALLCARGO': 'transportlogistics/allcargologistics/AGL02' }
-      
-for k in stock_list.items:
-    if not os.path.isfile(DOWNLOAD_PATH+k+'_P/E_history.csv'):
-        file = open(DOWNLOAD_PATH+k+'_P/E_history.csv','w')
-        file.write('DATE, STANDALONE_P/E,	INDUSTRY_P/E,	CONSOLIDATED_P/E\n')
-        file.close()
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+HEADERS = {"User-Agent": UA}
 
-def work(k, v, count):
-        p = requests.get('http://www.moneycontrol.com/india/stockpricequote/'+v).text
-        a = open('/tmp/'+k+vdat+'.txt', 'w') #temporary storage of the webpage to extract the data.
-        a.write(p)
-        a.close()
-        
-        b = open('/tmp/'+k+vdat+'.txt','r')
-        c = open(DOWNLOAD_PATH+k+'_P/E_history.csv','a')
-        prev, cou, data = '', 0, []
-        data.append(vdat)
-        
-        for line in b:
-            if cou <= 2 and 'P/E' in prev :
-                d = re.findall('">([0-9]+.[0-9]+)', line) #var 'd' is a list here
-                if len(d) == 0:
-                    d.append('nan')
-                data.append(d[0])
-                cou += 1
-                if c == 3 :
-                    break
-            prev=line  #REMEMBER THE PREVIOUS LINE.
-            
-        for j in data:
-            li = ','.join(data)
-        c.write(li)  # print this line
-        c.write('\n')
-        b.close()
-        c.close()
-        print(k,count)
-        
-if __name__ == '__main__' :
-    pool = Pool(processes = 14)
-    for k, v in stock_list.items():
-        count+ = 1
-        pool.apply_async(func = work, args = (k, v, count))
+SEARCH_URL = "https://api.moneycontrol.com/mcapi/v1/stock/search"
+QUOTE_URL = "https://www.moneycontrol.com/india/stockpricequote/x/x/{did}"
+
+FIELDS = ["companyName", "lastPrice", "perChange", "marketCap",
+          "scTtm", "priceBook", "roe", "debtEquity", "netProfit", "netSales"]
+# scTtm = Stock P/E (TTM), priceBook = P/B ratio
+
+CSV_HEADER = ["date", "query", "did"] + FIELDS
+
+
+def resolve_did(query, session=None):
+    """Look up a company name/symbol via MoneyControl's search API and return
+    its internal 'did' code, or None if no confident match is found."""
+    s = session or requests
+    try:
+        r = s.get(SEARCH_URL, params={"query": query, "type": "all"}, headers=HEADERS, timeout=15)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+    except (requests.RequestException, ValueError):
+        return None
+
+    if not data:
+        return None
+
+    q = query.strip().lower()
+    # exact (case-insensitive) match on full_name or short_name first
+    for item in data:
+        if item.get("full_name", "").strip().lower() == q or item.get("short_name", "").strip().lower() == q:
+            return item["did"]
+    # otherwise the closest substring match - prefer full_name starting with the query
+    for item in data:
+        if item.get("full_name", "").strip().lower().startswith(q):
+            return item["did"]
+    return None
+
+
+def fetch_fundamentals(did, session=None):
+    """Fetch a company's MoneyControl page by did and extract the confirmed
+    id="{did}_<fieldname>" fields. Returns a dict of field -> float|None."""
+    s = session or requests
+    url = QUOTE_URL.format(did=did)
+    r = s.get(url, headers=HEADERS, timeout=15)
+    r.raise_for_status()
+    html = r.text
+    return parse_fundamentals(html, did)
+
+
+def parse_fundamentals(html, did):
+    result = {}
+    for field in FIELDS:
+        m = re.search(rf'id="{re.escape(did)}_{field}"[^>]*>([^<]*)<', html)
+        if not m:
+            result[field] = None
+            continue
+        raw = m.group(1).strip()
+        if field == "companyName":
+            result[field] = raw or None
+            continue
+        cleaned = raw.replace(",", "")
+        try:
+            result[field] = float(cleaned)
+        except ValueError:
+            result[field] = None
+    return result
+
+
+def main(stock_queries, out_csv_path="moneycontrol_fundamentals.csv", sleep_between=0.5):
+    today = str(date.today())
+    write_header = not os.path.exists(out_csv_path)
+    session = requests.Session()
+
+    with open(out_csv_path, "a", newline="") as f:
+        writer = csv.writer(f)
+        if write_header:
+            writer.writerow(CSV_HEADER)
+
+        for query in stock_queries:
+            did = resolve_did(query, session=session)
+            if did is None:
+                print(f"[skip] no confident match for '{query}'")
+                continue
+            try:
+                data = fetch_fundamentals(did, session=session)
+            except requests.RequestException as e:
+                print(f"[failed] {query} ({did}): {e}")
+                continue
+            row = [today, query, did] + [data.get(f) for f in FIELDS]
+            writer.writerow(row)
+            print(f"[ok] {query} -> {did}: P/E={data.get('scTtm')}, P/B={data.get('priceBook')}")
+            time.sleep(sleep_between)
+
+
+if __name__ == "__main__":
+    # Example list - replace with whatever companies you want, searched by name or symbol
+    stock_queries = ["Reliance Industries", "TCS", "HDFC Bank", "Infosys"]
+    main(stock_queries)
